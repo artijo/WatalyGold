@@ -63,20 +63,16 @@ class ImageGridItem extends StatelessWidget {
 
   VoidCallback? _handleTap(BuildContext context, ImageState imageState) {
     if (image == null) {
-      print(imageState.selectedStatus);
       return () => imageState.setSelectedStatus(index + 1);
     }
     if ((image!.statusMango == 0 && image!.statusMangoColor == 0) ||
         (image!.statusMango == 1 && image!.statusMangoColor == 0)) {
-      print(2);
       return null;
     }
     if (image!.statusMango == 1 && image!.statusMangoColor == 1) {
-      print(3);
       return null;
     }
     return () {
-      print("ทำงาน");
       imageState.removeCapturedImage(image!);
       imageState.setSelectedStatus(index + 1);
     };

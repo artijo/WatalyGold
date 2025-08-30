@@ -6,7 +6,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
-import 'package:firebase_ml_model_downloader/firebase_ml_model_downloader.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_gemini/flutter_gemini.dart';
@@ -18,7 +17,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:tflite_flutter/tflite_flutter.dart' as tfl;
+import 'package:watalygold/utils/gemini_rate_limiter.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:watalygold/Home/Model/Image_State.dart';
@@ -58,30 +57,16 @@ class TakePictureScreen extends StatefulWidget {
 }
 
 class TakePictureScreenState extends State<TakePictureScreen> {
-  late tfl.Interpreter _interpreter;
-  final dynamic _probability = 0;
-  List<String>? _labels;
   String? result;
-
   final ImagePicker picker = ImagePicker();
-  Timer? _lightMeterTimer;
-  bool _isProcessing = false;
-
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
-  late File model;
   String _mobileDeviceIdentifier = "";
   int selectedIndex = 0;
-  FirebaseModelDownloader downloader = FirebaseModelDownloader.instance;
-  final List _predictions = [];
-
   late bool checkhowtouse;
-
   int statusimage = 1;
-
   bool _noInternet = false;
   final Connectivity _connectivity = Connectivity();
-  late StreamSubscription<ConnectivityResult> _connectivitySubscription;
   bool _isBottomSheetShown = false;
 
   Future<String?> getDeviceId() async {
@@ -336,47 +321,88 @@ class TakePictureScreenState extends State<TakePictureScreen> {
   }
 
   Future _checkDetectCoin(File imagename, int index) async {
-    final bytes = await imagename.readAsBytes();
-    final image = img.decodeImage(bytes);
-
-    // Resize image ถ้าต้องการ
-    final resizedImage =
-        img.copyResize(image!, width: 1000); // ปรับขนาดตามต้องการ
-    final compressedBytes = img.encodeJpg(resizedImage, quality: 80);
-
-    // 2. แปลงรูปภาพเป็น base64
-    final base64Image = base64Encode(compressedBytes);
-
-    var firebasefunctions =
-        FirebaseFunctions.instanceFor(region: 'asia-southeast1');
-
-    final previewResult = {"imagename": base64Image, 'format': 'jpg'};
-    print(previewResult);
     try {
-      final result = await firebasefunctions
-          .httpsCallable("detectcoin10and5")
-          .call(previewResult);
-      print(result.data);
-      final Map<String, dynamic> data = Map<String, dynamic>.from(result.data);
-      final message = data['message'];
-      if (message == "เป็นเหรียญ 5 บาท") {
-        return;
-      } else {
-        context.read<ImageState>().updateStatusMango(index, 2);
+      final bytes = await imagename.readAsBytes();
+      final image = img.decodeImage(bytes);
+
+      if (image == null) {
+        print("Error: Cannot decode image for coin detection");
         return;
       }
+
+      // Resize image ถ้าต้องการ
+      final resizedImage =
+          img.copyResize(image, width: 1000); // ปรับขนาดตามต้องการ
+      final compressedBytes = img.encodeJpg(resizedImage, quality: 80);
+
+      // 2. แปลงรูปภาพเป็น base64
+      final base64Image = base64Encode(compressedBytes);
+
+      var firebasefunctions =
+          FirebaseFunctions.instanceFor(region: 'asia-southeast1');
+
+      final previewResult = {"imagename": base64Image, 'format': 'jpg'};
+      print("Calling detectcoin10and5 function...");
+
+      final result = await firebasefunctions
+          .httpsCallable("detectcoin10and5")
+          .call(previewResult)
+          .timeout(Duration(seconds: 30)); // Add timeout
+
+      print("Coin detection result: ${result.data}");
+
+      if (result.data != null) {
+        final Map<String, dynamic> data =
+            Map<String, dynamic>.from(result.data);
+        final message = data['message'];
+
+        if (message == "เป็นเหรียญ 5 บาท") {
+          print("Coin detected: 5 baht coin found");
+          return;
+        } else {
+          print("Coin detection: Not a 5 baht coin - $message");
+          context.read<ImageState>().updateStatusMango(index, 2);
+          return;
+        }
+      } else {
+        print("Coin detection: No valid response data");
+        // Don't update status if function returns null
+        return;
+      }
+    } on TimeoutException catch (error) {
+      debugPrint('Coin detection timeout: $error');
+      // Skip coin detection on timeout, don't mark as invalid
+      return;
     } on FirebaseFunctionsException catch (error) {
       debugPrint(
           'Functions error code: ${error.code}, details: ${error.details}, message: ${error.message}');
-      Navigator.of(context).pop();
-      await showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (BuildContext context) {
-          return Dialog_Error(
-              name: "เกิดข้อผิดพลาดบางอย่าง", content: "กรุณาลองใหม่อีกครั้ง");
-        },
-      );
+
+      // Handle specific error codes
+      if (error.code == 'not-found') {
+        debugPrint('Firebase function not found - skipping coin detection');
+        // Skip coin detection if function doesn't exist
+        return;
+      } else if (error.code == 'unauthenticated') {
+        debugPrint('Authentication error - user not authenticated');
+        Navigator.of(context).pop();
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext context) {
+            return Dialog_Error(
+                name: "เกิดข้อผิดพลาดการยืนยันตัวตน",
+                content: "กรุณาเข้าสู่ระบบใหม่อีกครั้ง");
+          },
+        );
+        return;
+      } else {
+        // For other errors, show generic error but don't fail the whole process
+        debugPrint('Coin detection failed, continuing without coin validation');
+        return;
+      }
+    } catch (error) {
+      debugPrint('Unexpected error in coin detection: $error');
+      // Skip coin detection on unexpected errors
       return;
     }
   }
@@ -419,74 +445,124 @@ class TakePictureScreenState extends State<TakePictureScreen> {
         ),
       );
 
-      print("พบสีเหลือง");
+      try {
+        print("พบสีเหลือง");
 
-      String uniquename = DateTime.now().millisecondsSinceEpoch.toString();
+        String uniquename = DateTime.now().millisecondsSinceEpoch.toString();
 
-      // ชื่อของรูปภาพที่ต้องการ
-      List<String> imageNames = [
-        'Front_$uniquename',
-        'Back_$uniquename',
-        'Bottom_$uniquename',
-        'Top_$uniquename',
-      ];
+        // ชื่อของรูปภาพที่ต้องการ
+        List<String> imageNames = [
+          'Front_$uniquename',
+          'Back_$uniquename',
+          'Bottom_$uniquename',
+          'Top_$uniquename',
+        ];
 
-      List<String> imageuri = [];
-      List<String> downloaduri = [];
-      List<String> listImagepath = [];
+        List<String> imageuri = [];
+        List<String> downloaduri = [];
+        List<String> listImagepath = [];
 
-      for (int i = 1; i <= 4; i++) {
-        final capturedImage = findCapturedImageByStatusImage(i);
+        bool allImagesUploaded = true;
+        String errorMessage = "";
 
-        if (capturedImage != null) {
-          final result = await uploadImageToCloudStorage(
-              capturedImage.image, imageNames[i - 1]);
+        for (int i = 1; i <= 4; i++) {
+          final capturedImage = findCapturedImageByStatusImage(i);
 
-          if (result.containsKey('downloadURL')) {
-            final imagePath =
-                await saveImageToDevice(capturedImage.image, imageNames[i - 1]);
-
-            stdout.writeln('Saved image path: $imagePath');
-            listImagepath.add(imagePath.toString());
-            downloaduri.add(result['downloadURL']!);
-            imageuri.add(result['imageName']!);
-          } else {
-            print("Upload failed or result is null for statusimage $i");
+          if (capturedImage == null) {
+            print("ไม่พบภาพสำหรับ statusimage $i");
+            allImagesUploaded = false;
+            errorMessage = "ไม่พบภาพที่จำเป็นสำหรับการอัปโหลด";
+            break;
           }
-        } else {
-          print("ไม่พบภาพสำหรับ statusimage $i");
+
+          try {
+            final result = await uploadImageToCloudStorage(
+                capturedImage.image, imageNames[i - 1]);
+
+            if (result.containsKey('downloadURL') &&
+                result.containsKey('imageName') &&
+                result['downloadURL']!.isNotEmpty &&
+                result['imageName']!.isNotEmpty) {
+              final imagePath = await saveImageToDevice(
+                  capturedImage.image, imageNames[i - 1]);
+
+              stdout.writeln('Saved image path: $imagePath');
+              listImagepath.add(imagePath.toString());
+              downloaduri.add(result['downloadURL']!);
+              imageuri.add(result['imageName']!);
+            } else {
+              print(
+                  "Upload failed or invalid result for statusimage $i: $result");
+              allImagesUploaded = false;
+              errorMessage = "การอัปโหลดภาพล้มเหลวสำหรับภาพที่ $i";
+              break;
+            }
+          } catch (e) {
+            print("Error uploading image $i: $e");
+            allImagesUploaded = false;
+            errorMessage =
+                "เกิดข้อผิดพลาดในการอัปโหลดภาพที่ $i: ${e.toString()}";
+            break;
+          }
         }
-      }
 
-      bool allImagesUploaded = true;
-      String downloadurl = downloaduri.join(',');
-      String concatenatedString = imageuri.join(',');
+        if (allImagesUploaded &&
+            downloaduri.length == 4 &&
+            imageuri.length == 4) {
+          String downloadurl = downloaduri.join(',');
+          String concatenatedString = imageuri.join(',');
 
-      final imageState = context.read<ImageState>();
-      final capturedImagesFiles = imageState.getSortedImageFiles;
+          final imageState = context.read<ImageState>();
+          final capturedImagesFiles = imageState.getSortedImageFiles;
 
-// ตอนที่ใช้ results ใน preview_result:
-      final previewResult = {
-        'downloadurl': downloadurl,
-        "imagename": concatenatedString,
-        "ip": _mobileDeviceIdentifier,
-        "result": "Yellow"
-      };
+          final previewResult = {
+            'downloadurl': downloadurl,
+            "imagename": concatenatedString,
+            "ip": _mobileDeviceIdentifier,
+            "result": "Yellow"
+          };
 
-      debugPrint("$previewResult");
-      debugPrint("เสร็จสิ้น");
-      if (allImagesUploaded) {
-        Navigator.of(context).pop();
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => WeightNumber(
-              camera: widget.camera,
-              capturedImage: capturedImagesFiles,
-              ListImagePath: listImagepath,
-              httpscall: previewResult,
+          debugPrint("Upload successful: $previewResult");
+          debugPrint("เสร็จสิ้น");
+
+          Navigator.of(context).pop();
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => WeightNumber(
+                camera: widget.camera,
+                capturedImage: capturedImagesFiles,
+                ListImagePath: listImagepath,
+                httpscall: previewResult,
+              ),
             ),
-          ),
+          );
+          context.read<ImageState>().imageclean();
+        } else {
+          Navigator.of(context).pop();
+          await showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (BuildContext context) {
+              return Dialog_Error(
+                  name: "เกิดข้อผิดพลาดในการอัปโหลดภาพ",
+                  content: errorMessage.isNotEmpty
+                      ? errorMessage
+                      : "ไม่สามารถอัปโหลดภาพได้ กรุณาลองใหม่อีกครั้ง");
+            },
+          );
+          context.read<ImageState>().imageclean();
+        }
+      } catch (e) {
+        Navigator.of(context).pop();
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext context) {
+            return Dialog_Error(
+                name: "เกิดข้อผิดพลาดที่ไม่คาดคิด",
+                content: "เกิดข้อผิดพลาด: ${e.toString()}");
+          },
         );
         context.read<ImageState>().imageclean();
       }
@@ -497,14 +573,9 @@ class TakePictureScreenState extends State<TakePictureScreen> {
         builder: (BuildContext context) {
           return Dialog_Error(
               name: "เกิดข้อผิดพลาด",
-              content: "เซิฟเวอร์ทำงานผิดพลาด กรุณาลองใหม่อีกครั้ง");
+              content: "ภาพไม่ครบ 4 ภาพ กรุณาถ่ายภาพให้ครบ");
         },
       );
-      Navigator.of(context).pop();
-      setState(() {
-        capturedImages.clear();
-      });
-      print("ผลลัพธ์ไม่ตรงกับที่คาดหวัง: $result");
     }
   }
 
@@ -518,18 +589,111 @@ class TakePictureScreenState extends State<TakePictureScreen> {
 
   Future<Map<String, String>> uploadImageToCloudStorage(
       File imageFile, String imageName) async {
-    final storageRef =
-        FirebaseStorage.instance.ref().child('image_analysis/$imageName');
+    try {
+      debugPrint('=== Starting upload for $imageName ===');
 
-    // เปลี่ยนประเภทเป็นรูป
-    final metadata = SettableMetadata(contentType: 'image/jpg');
+      // ตรวจสอบการเชื่อมต่ออินเทอร์เน็ต
+      try {
+        final result = await InternetAddress.lookup('google.com')
+            .timeout(Duration(seconds: 10));
+        if (result.isNotEmpty && result[0].rawAddress.isNotEmpty) {
+          debugPrint('Internet connection: OK');
+        }
+      } catch (e) {
+        debugPrint('Internet connection check failed: $e');
+        throw Exception('กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต');
+      }
 
-    final uploadTask = storageRef.putFile(imageFile, metadata);
-    final snapshot = await uploadTask;
+      // ตรวจสอบว่าไฟล์มีอยู่จริง
+      if (!await imageFile.exists()) {
+        debugPrint('File does not exist: ${imageFile.path}');
+        throw Exception('ไฟล์ภาพไม่พบ: ${imageFile.path}');
+      }
 
-    String downloadURL = await snapshot.ref.getDownloadURL();
-    final result = {'downloadURL': downloadURL, 'imageName': imageName};
-    return result;
+      // ตรวจสอบขนาดไฟล์
+      final fileSize = await imageFile.length();
+      if (fileSize == 0) {
+        debugPrint('File is empty: ${imageFile.path}');
+        throw Exception('ไฟล์ภาพเสียหาย หรือไฟล์ว่าง');
+      }
+
+      debugPrint('File validation OK: $imageName, Size: ${fileSize} bytes');
+
+      final storageRef =
+          FirebaseStorage.instance.ref().child('image_analysis/$imageName');
+
+      // เปลี่ยนประเภทเป็นรูป
+      final metadata = SettableMetadata(contentType: 'image/jpg');
+
+      debugPrint('Starting Firebase Storage upload...');
+      final uploadTask = storageRef.putFile(imageFile, metadata);
+
+      // เพิ่ม progress tracking
+      uploadTask.snapshotEvents.listen((TaskSnapshot snapshot) {
+        double progress =
+            (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+        debugPrint(
+            'Upload progress for $imageName: ${progress.toStringAsFixed(1)}%');
+      }, onError: (e) {
+        debugPrint('Upload stream error for $imageName: $e');
+      });
+
+      // รอการอัปโหลดเสร็จสิ้น
+      final snapshot = await uploadTask.whenComplete(() => null);
+
+      // ตรวจสอบสถานะการอัปโหลด
+      if (snapshot.state != TaskState.success) {
+        debugPrint('Upload failed with state: ${snapshot.state}');
+        throw Exception('การอัปโหลดไม่สำเร็จ: ${snapshot.state}');
+      }
+
+      debugPrint('Upload completed, getting download URL...');
+      String downloadURL = await snapshot.ref.getDownloadURL();
+
+      // ตรวจสอบว่า downloadURL ไม่เป็นค่าว่าง
+      if (downloadURL.isEmpty) {
+        debugPrint('Download URL is empty');
+        throw Exception('ไม่สามารถได้รับ Download URL');
+      }
+
+      final result = {'downloadURL': downloadURL, 'imageName': imageName};
+      debugPrint('Upload successful: $imageName -> $downloadURL');
+      return result;
+    } on FirebaseException catch (e) {
+      debugPrint('Firebase error for $imageName: ${e.code} - ${e.message}');
+      String errorMessage;
+      switch (e.code) {
+        case 'storage/unauthorized':
+          errorMessage = 'ไม่มีสิทธิ์ในการอัปโหลดภาพ';
+          break;
+        case 'storage/canceled':
+          errorMessage = 'การอัปโหลดถูกยกเลิก';
+          break;
+        case 'storage/unknown':
+          errorMessage =
+              'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต';
+          break;
+        case 'storage/retry-limit-exceeded':
+          errorMessage = 'การเชื่อมต่อไม่เสถียร กรุณาลองใหม่อีกครั้ง';
+          break;
+        case 'storage/quota-exceeded':
+          errorMessage = 'เนื้อที่จัดเก็บเต็ม';
+          break;
+        default:
+          errorMessage = 'เกิดข้อผิดพลาดจาก Firebase: ${e.message ?? e.code}';
+      }
+      throw Exception(errorMessage);
+    } on SocketException catch (e) {
+      debugPrint('Network error for $imageName: $e');
+      throw Exception('กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต');
+    } on TimeoutException catch (e) {
+      debugPrint('Timeout error for $imageName: $e');
+      throw Exception('การเชื่อมต่อล่าช้า กรุณาลองใหม่อีกครั้ง');
+    } catch (e) {
+      debugPrint('Unexpected error for $imageName: $e');
+      throw Exception(
+          'เกิดข้อผิดพลาดในการอัปโหลดภาพ $imageName: ${e.toString()}');
+    }
   }
 
   late int flashstatus = 0;
@@ -707,24 +871,13 @@ class TakePictureScreenState extends State<TakePictureScreen> {
         geminiProcessCount++;
       });
 
-      final gemini = Gemini.instance;
-      final result = await gemini.textAndImage(
-        // text:
-        //     """ From the picture I gave you, can you check if there is a mango and a 5 baht coin in this picture? If there are both, then answer "mango".
-        // If there are neither or if there is a hand or finger in the picture, then answer "not a mango".
-        // Please note that this picture may show the mango from different angles, such as front, back, top or bottom.
-        // The bottom may look like the top of the mango but there is no stem in the middle.""",
-        text: """
-          ฉันจะส่งรูปภาพให้คุณ ให้คุณลองเช็คดูว่าในรูปนี้มีมะม่วงมั้ย ถ้าเป็นมะม่วงให้ตอบว่า "mango"
-          ถ้าไม่เป็นมะม่วงหรือไม่มีมะม่วง ให้ตอบว่า "ไม่ใช่มะม่วง" โดยฉันขออธิบายเพิ่มเติมว่า มะม่วงที่ฉันจะส่งรูปภาพให้คุณ มีทั้งมะม่วงที่ถ่ายจากด้านหน้า ด้านหลัง ด้านล่าง และด้านบนของมะม่วง เพราะฉะนั้นฉันคิดว่าคุณน่าจะทราบอยู่แล้วว่ามะม่วงมีลักษณะอย่างไร
-          และเพิ่มเติมช่วยบอกสาเหตุฉันหน่อยว่า ทำไมไม่ใช่มะม่วง
-        """,
-        images: [await image.readAsBytes()],
-      );
+      debugPrint(
+          "Starting Gemini analysis for image $index (total calls: $geminiProcessCount)");
 
-      debugPrint("จำนวนครั้งที่ส่งไป Gemini: $geminiProcessCount");
+      final result = await _callGeminiWithRetry(image, index);
 
       final geminiText = (result?.content?.parts?.last.text ?? '').trim();
+      debugPrint("Gemini response for image $index: $geminiText");
 
       setState(() {
         if (geminiText == "mango" || geminiText == "mango.") {
@@ -735,16 +888,101 @@ class TakePictureScreenState extends State<TakePictureScreen> {
         }
         checkCapturedImages();
       });
-      await _checkDetectCoin(image, index);
 
-      debugPrint("Gemini response: $geminiText");
+      // Only call coin detection if mango is detected
+      if (geminiText == "mango" || geminiText == "mango.") {
+        await _checkDetectCoin(image, index);
+      }
+    } on TimeoutException catch (error) {
+      setState(() {
+        geminiProcessCount--;
+      });
+      debugPrint("Gemini timeout error: $error");
+      await _showGeminiErrorDialog("การวิเคราะห์ล้มเหลว",
+          "การวิเคราะห์ภาพใช้เวลานานเกินไป กรุณาลองใหม่อีกครั้ง");
     } catch (error) {
       setState(() {
         geminiProcessCount--;
       });
-      debugPrint("Error: $error");
-      // จัดการ error ตามที่ต้องการ
+      debugPrint("Gemini analysis error: $error");
+
+      String errorMessage =
+          "ไม่สามารถวิเคราะห์ภาพได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ตและลองใหม่อีกครั้ง";
+
+      if (error.toString().contains('429')) {
+        errorMessage =
+            "มีการใช้งานจำนวนมากเกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง";
+      }
+
+      await _showGeminiErrorDialog(
+          "เกิดข้อผิดพลาดในการวิเคราะห์", errorMessage);
     }
+  }
+
+  Future<dynamic> _callGeminiWithRetry(File image, int index,
+      {int maxRetries = 3}) async {
+    final rateLimiter = GeminiRateLimiter();
+
+    return await rateLimiter.executeRequest(() async {
+      for (int attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          debugPrint(
+              "Gemini API call attempt $attempt/$maxRetries for image $index");
+
+          // Add delay between retries, with exponential backoff
+          if (attempt > 1) {
+            int delaySeconds = (attempt - 1) * 3; // 3s, 6s, 9s...
+            debugPrint("Waiting ${delaySeconds}s before retry...");
+            await Future.delayed(Duration(seconds: delaySeconds));
+          }
+
+          final gemini = Gemini.instance;
+          final result = await gemini.textAndImage(
+            text: """
+              ฉันจะส่งรูปภาพให้คุณ ให้คุณลองเช็คดูว่าในรูปนี้มีมะม่วงมั้ย ถ้าเป็นมะม่วงให้ตอบว่า "mango"
+              ถ้าไม่เป็นมะม่วงหรือไม่มีมะม่วง ให้ตอบว่า "ไม่ใช่มะม่วง" โดยฉันขออธิบายเพิ่มเติมว่า มะม่วงที่ฉันจะส่งรูปภาพให้คุณ มีทั้งมะม่วงที่ถ่ายจากด้านหน้า ด้านหลัง ด้านล่าง และด้านบนของมะม่วง เพราะฉะนั้นฉันคิดว่าคุณน่าจะทราบอยู่แล้วว่ามะม่วงมีลักษณะอย่างไร
+              และเพิ่มเติมช่วยบอกสาเหตุฉันหน่อยว่า ทำไมไม่ใช่มะม่วง
+            """,
+            images: [await image.readAsBytes()],
+          ).timeout(Duration(seconds: 60)); // Increased timeout
+
+          debugPrint("Gemini API call successful for image $index");
+          return result;
+        } catch (error) {
+          debugPrint(
+              "Gemini API call attempt $attempt failed for image $index: $error");
+
+          bool shouldRetry = false;
+          if (error.toString().contains('429')) {
+            shouldRetry = true;
+            debugPrint("Rate limit error detected, will retry...");
+          } else if (error is TimeoutException) {
+            shouldRetry = attempt < maxRetries;
+            debugPrint("Timeout error, will retry: $shouldRetry");
+          } else if (error.toString().toLowerCase().contains('network') ||
+              error.toString().toLowerCase().contains('connection')) {
+            shouldRetry = attempt < maxRetries;
+            debugPrint("Network error, will retry: $shouldRetry");
+          }
+
+          if (!shouldRetry || attempt == maxRetries) {
+            throw error;
+          }
+        }
+      }
+
+      throw Exception("All retry attempts failed");
+    });
+  }
+
+  Future<void> _showGeminiErrorDialog(String title, String content) async {
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return Dialog_Error(name: title, content: content);
+      },
+    );
   }
 
   int geminiProcessCount = 0;
@@ -1080,19 +1318,5 @@ class TakePictureScreenState extends State<TakePictureScreen> {
         );
       }
     });
-  }
-}
-
-class _MediaSizeClipper extends CustomClipper<Rect> {
-  final Size mediaSize;
-  const _MediaSizeClipper(this.mediaSize);
-  @override
-  Rect getClip(Size size) {
-    return Rect.fromLTWH(0, 0, mediaSize.width, mediaSize.height);
-  }
-
-  @override
-  bool shouldReclip(CustomClipper<Rect> oldClipper) {
-    return true;
   }
 }

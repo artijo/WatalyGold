@@ -19,7 +19,6 @@ import 'package:watalygold/Widgets/Color.dart';
 import 'package:watalygold/Widgets/DialogCollection.dart';
 import 'package:watalygold/Widgets/DialogSuccess.dart';
 import 'package:watalygold/models/Collection.dart';
-import 'package:watalygold/models/Image.dart';
 
 class ResultPage extends StatefulWidget {
   const ResultPage(
@@ -41,6 +40,7 @@ class ResultPage extends StatefulWidget {
 class _ResultPageState extends State<ResultPage> {
   List<Collection>? collection;
   bool _loading = true;
+  bool _hasError = false;
   int? user_id;
   int? resultId;
 
@@ -58,25 +58,102 @@ class _ResultPageState extends State<ResultPage> {
   @override
   void initState() {
     super.initState();
-    _fetchUserId();
-    _fetchData();
-    _loadCollections();
+    _initializeData();
     // stdout.writeln("เสร็จสิ้น");
   }
 
+  Future<void> _initializeData() async {
+    try {
+      debugPrint("Starting initialization...");
+      await _fetchUserId();
+      await _loadCollections();
+      await _fetchData();
+      debugPrint("Initialization completed");
+    } catch (error) {
+      debugPrint("Error during initialization: $error");
+      setState(() {
+        _loading = false;
+        _hasError = true;
+      });
+    }
+  }
+
   Future<void> _loadCollections() async {
-    collection = await Collection_DB().fetchAll();
-    stdout.writeln(collection!.length);
-    setState(() {});
+    try {
+      debugPrint("Loading collections...");
+      collection = await Collection_DB().fetchAll();
+      debugPrint("Collections loaded: ${collection!.length} items");
+    } catch (error) {
+      debugPrint("Error loading collections: $error");
+      collection = []; // Set empty list as fallback
+    }
   }
 
   Future<void> _fetchUserId() async {
-    // ดึง user_id จากฐานข้อมูล
-    final users = await User_db().fetchAll();
-    if (users.isNotEmpty) {
+    try {
+      debugPrint("Fetching user ID...");
+      // ดึง user_id จากฐานข้อมูล
+      final users = await User_db().fetchAll();
+      if (users.isNotEmpty) {
+        setState(() {
+          user_id = users.first.user_id;
+        });
+        debugPrint("User ID found: $user_id");
+      } else {
+        debugPrint("No users found in database, creating default user...");
+        try {
+          // สร้าง user ใหม่หากไม่พบ
+          final ipAddress =
+              'default_ip_${DateTime.now().millisecondsSinceEpoch}';
+          debugPrint("Creating user with IP: $ipAddress");
+
+          final newUserId = await User_db().create(
+            user_ipaddress: ipAddress,
+          );
+
+          debugPrint("User creation result: $newUserId");
+
+          // ถ้า create() return 0 แสดงว่าเจอ user อยู่แล้ว ให้ fetch อีกครั้ง
+          if (newUserId == 0) {
+            debugPrint("User already exists, fetching again...");
+            final usersAfterCreate = await User_db().fetchAll();
+            if (usersAfterCreate.isNotEmpty) {
+              setState(() {
+                user_id = usersAfterCreate.first.user_id;
+              });
+              debugPrint("Existing user found with ID: $user_id");
+            } else {
+              throw Exception('Failed to get user ID after create attempt');
+            }
+          } else {
+            setState(() {
+              user_id = newUserId;
+            });
+            debugPrint("New user created with ID: $user_id");
+          }
+        } catch (createError) {
+          debugPrint("Error during user creation: $createError");
+          throw Exception('Failed to create user: $createError');
+        }
+      }
+
+      // Final check: ให้แน่ใจว่า user_id ไม่เป็น null
+      if (user_id == null) {
+        debugPrint("Final check: user_id is still null, using fallback");
+        // ใช้ fallback - set user_id เป็น 1 (สำหรับ testing)
+        setState(() {
+          user_id = 1;
+        });
+        debugPrint("Using fallback user_id: $user_id");
+      }
+    } catch (error) {
+      debugPrint("Error fetching user ID: $error");
+      // ใน case ที่เกิด error ใดๆ ให้ใช้ fallback user_id
+      debugPrint("Using fallback user_id due to error");
       setState(() {
-        user_id = users.first.user_id;
+        user_id = 1;
       });
+      debugPrint("Fallback user_id set to: $user_id");
     }
   }
 
@@ -102,51 +179,67 @@ class _ResultPageState extends State<ResultPage> {
   }
 
   Future<void> _insertImage(int resultId) async {
-    stdout.writeln(resultId);
-    final results = FirebaseFirestore.instance.collection('Image');
+    try {
+      debugPrint("_insertImage started with resultId: $resultId");
+      final results = FirebaseFirestore.instance.collection('Image');
 
-    // สร้าง List เพื่อเก็บค่า flawsPercent และ brownSpot
-    List<double> flawsPercentList = [];
-    List<double> brownSpotList = [];
+      // สร้าง List เพื่อเก็บค่า flawsPercent และ brownSpot
+      List<double> flawsPercentList = [];
+      List<double> brownSpotList = [];
 
-    for (int i = 0; i < widget.ID_Image.length; i++) {
-      debugPrint("1234");
-      final document = await results.doc(widget.ID_Image[i]).get();
-      debugPrint(document["img_status"].toString());
+      for (int i = 0; i < widget.ID_Image.length; i++) {
+        debugPrint(
+            "Processing image ${i + 1}/${widget.ID_Image.length}: ${widget.ID_Image[i]}");
 
-      // ดึงค่า flawsPercent และ brownSpot จาก document
-      double flawsPercent = document["flaws_percent"].toDouble();
-      double brownSpot = document["brown_spot"].toDouble();
+        final document = await results.doc(widget.ID_Image[i]).get();
 
-      // เก็บค่า flawsPercent และ brownSpot ไว้ใน List
-      flawsPercentList.add(flawsPercent);
-      brownSpotList.add(brownSpot);
+        if (!document.exists) {
+          debugPrint(
+              "Warning: Image document ${widget.ID_Image[i]} does not exist");
+          continue;
+        }
 
-      await Image_DB().insertdata(
-          result_id: resultId.toInt(),
-          image_status: document["img_status"].toString(),
-          image_name: widget.ID_Image[i].toString(),
-          image_url: widget.ListImagePath[i].toString(),
-          image_weight: document["mango_weight"].toDouble(),
-          flaws_percent: document["flaws_percent"].toDouble(),
-          brown_spot: document["brown_spot"].toDouble(),
-          color: document["color"].toString());
+        debugPrint("Image status: ${document["img_status"]}");
 
-      debugPrint("สร้างข้อมูลรูปภาพเสร็จ");
-      setState(() {});
+        // ดึงค่า flawsPercent และ brownSpot จาก document
+        double flawsPercent = (document["flaws_percent"] ?? 0.0).toDouble();
+        double brownSpot = (document["brown_spot"] ?? 0.0).toDouble();
+
+        // เก็บค่า flawsPercent และ brownSpot ไว้ใน List
+        flawsPercentList.add(flawsPercent);
+        brownSpotList.add(brownSpot);
+
+        await Image_DB().insertdata(
+            result_id: resultId.toInt(),
+            image_status: document["img_status"]?.toString() ?? '',
+            image_name: widget.ID_Image[i].toString(),
+            image_url: widget.ListImagePath[i].toString(),
+            image_weight: (document["mango_weight"] ?? 0.0).toDouble(),
+            flaws_percent: flawsPercent,
+            brown_spot: brownSpot,
+            color: document["color"]?.toString() ?? '');
+
+        debugPrint("Image ${i + 1} inserted successfully");
+      }
+
+      if (flawsPercentList.isNotEmpty && brownSpotList.isNotEmpty) {
+        List<double> fixedFlawsPercentages =
+            calculateFixedPercentages(flawsPercentList);
+        List<double> fixedBrownSpotPercentages =
+            calculateFixedPercentages(brownSpotList);
+
+        // ผลลัพธ์ที่คำนวณได้
+        totalFlawsPercent = fixedFlawsPercentages.reduce((a, b) => a + b);
+        totalBrownSpot = fixedBrownSpotPercentages.reduce((a, b) => a + b);
+      }
+
+      debugPrint("Total Flaws Percent: $totalFlawsPercent");
+      debugPrint("Total Brown Spot: $totalBrownSpot");
+      debugPrint("_insertImage completed successfully");
+    } catch (error) {
+      debugPrint("Error in _insertImage: $error");
+      throw error; // Re-throw to be handled by caller
     }
-
-    List<double> fixedFlawsPercentages =
-        calculateFixedPercentages(flawsPercentList);
-    List<double> fixedBrownSpotPercentages =
-        calculateFixedPercentages(brownSpotList);
-
-    // ผลลัพธ์ที่คำนวณได้
-    totalFlawsPercent = fixedFlawsPercentages.reduce((a, b) => a + b);
-    totalBrownSpot = fixedBrownSpotPercentages.reduce((a, b) => a + b);
-
-    debugPrint("Total Flaws Percent: $totalFlawsPercent");
-    debugPrint("Total Brown Spot: $totalBrownSpot");
   }
 
   Future<void> _showToastUpdate() async {
@@ -162,26 +255,55 @@ class _ResultPageState extends State<ResultPage> {
 
   Future<void> _fetchData() async {
     try {
-      stdout.writeln("step 1");
+      debugPrint("_fetchData started");
+
+      if (user_id == null) {
+        debugPrint("Error: user_id is null");
+        throw Exception('User ID not found');
+      }
+
+      debugPrint("Fetching Firebase document: ${widget.ID_Result}");
       final results = FirebaseFirestore.instance.collection('Result');
       final document = await results.doc(widget.ID_Result).get();
-      grade = document['Quality'];
-      weight = document['Weight'];
-      anotherNote = document['Another_note'];
-      stdout.writeln("ทำงานอยู่จ้าเด้อ");
+
+      if (!document.exists) {
+        debugPrint("Error: Document does not exist");
+        throw Exception('Document not found');
+      }
+
+      debugPrint("Document data: ${document.data()}");
+
+      grade = document['Quality'] ?? '';
+      weight = (document['Weight'] ?? 0.0).toDouble();
+      anotherNote = document['Another_note'] ?? '';
+
+      debugPrint(
+          "Parsed data - Grade: $grade, Weight: $weight, Note: $anotherNote");
+      debugPrint("Creating result in local database...");
+
       resultId = await Result_DB().create(
           user_id: user_id!,
           another_note: anotherNote,
           quality: grade,
           weight: weight);
-      stdout.writeln("เสร็จสิ้นสร้าง result");
+
+      debugPrint("Result created with ID: $resultId");
+      debugPrint("Inserting images...");
+
       await _insertImage(resultId!);
+
+      debugPrint("All data fetched successfully");
+
       setState(() {
-        resultId = resultId;
         _loading = false;
       }); // อัพเดตการแสดงผล
     } catch (error) {
-      // จัดการข้อผิดพลาด
+      debugPrint('Error in _fetchData: $error');
+      debugPrint('Error type: ${error.runtimeType}');
+      setState(() {
+        _loading = false;
+      });
+      // จัดการข้อผิดพลาด - อาจจะแสดง error dialog
     }
   }
 
@@ -205,350 +327,415 @@ class _ResultPageState extends State<ResultPage> {
                     size: 200,
                   ),
                 )
-              : Column(
-                  children: [
-                    CarouselSlider(
-                      items: widget.capturedImage
-                          .map(
-                            (image) => AspectRatio(
-                              aspectRatio: 16 /
-                                  9, // คุณสามารถปรับอัตราส่วนตามต้องการ เช่น 4/3, 1/1 เป็นต้น
-                              child: Container(
-                                margin: EdgeInsets.symmetric(horizontal: 5.0),
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(8.0),
-                                  child: Image.file(
-                                    image,
-                                    fit: BoxFit.cover,
-                                  ),
-                                ),
-                              ),
+              : _hasError
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(20.0),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.error_outline,
+                              size: 80,
+                              color: Colors.red,
                             ),
-                          )
-                          .toList(),
-                      options: CarouselOptions(
-                        aspectRatio: 16 / 9, // ต้องตรงกับ AspectRatio ของ item
-                        viewportFraction: 0.8,
-                        initialPage: 0,
-                        enableInfiniteScroll: true,
-                        reverse: false,
-                        enlargeCenterPage: true,
-                        scrollDirection: Axis.horizontal,
-                      ),
-                    ),
-                    Card(
-                      clipBehavior: Clip.hardEdge,
-                      shape: const RoundedRectangleBorder(
-                        borderRadius: BorderRadius.vertical(
-                          top: Radius.circular(0),
-                          bottom: Radius.circular(20),
-                        ),
-                        //set border radius more than 50% of height and width to make circle
-                      ),
-                      color: WhiteColor,
-                      child: Column(
-                        children: [
-                          Container(
-                            alignment: Alignment.centerLeft,
-                            decoration: BoxDecoration(
-                              color: gradeColor[grade],
-                              borderRadius: BorderRadius.vertical(
-                                  bottom: Radius.circular(20)),
-                            ),
-                            width: double.infinity,
-                            height: 35,
-                            child: const Padding(
-                              padding: EdgeInsets.only(left: 25),
-                              child: Text(
-                                "จากผลการวิเคราะห์คุณภาพพบว่า :",
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 16,
-                                ),
-                              ),
-                            ),
-                          ),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Padding(
-                                padding:
-                                    const EdgeInsets.only(left: 25, top: 10),
-                                child: Text(
-                                  "เกรดระดับ ",
-                                  style: TextStyle(
-                                      color: Colors.black.withOpacity(0.8),
-                                      fontSize: 20),
-                                ),
-                              ),
-                              Padding(
-                                padding: EdgeInsets.only(left: 10, top: 10),
-                                child: Text(
-                                  "$grade",
-                                  style: TextStyle(
-                                      color: gradeColor[grade], fontSize: 20),
-                                ),
-                              ),
-                              Padding(
-                                padding: EdgeInsets.only(left: 110, top: 0),
-                                child: IconButton(
-                                  icon: FaIcon(
-                                    FontAwesomeIcons.shareNodes,
-                                    color: gradeColor[grade],
-                                  ),
-                                  onPressed: () {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (context) => SharePage(
-                                          grade: grade,
-                                          anotherNote: anotherNote,
-                                          capturedImages: widget.capturedImage,
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                ),
-                              ),
-                            ],
-                          ),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Padding(
-                                padding: EdgeInsets.only(
-                                    left: 25, top: 5, bottom: 10, right: 15),
-                                child: SingleChildScrollView(
-                                  child: Text(
-                                    anotherNote,
-                                    style: TextStyle(
-                                        color: gradeColor[grade], fontSize: 17),
-                                    // overflow: TextOverflow.ellipsis,
-                                    // maxLines: 2,
-                                  ),
-                                ),
-                              )
-                            ],
-                          )
-                        ],
-                      ),
-                    ),
-                    Card(
-                      clipBehavior: Clip.hardEdge,
-                      margin: EdgeInsets.only(top: 25),
-                      shape: const RoundedRectangleBorder(
-                        borderRadius: BorderRadius.vertical(
-                          top: Radius.circular(20),
-                          bottom: Radius.circular(10),
-                        ),
-                        //set border radius more than 50% of height and width to make circle
-                      ),
-                      color: WhiteColor,
-                      child: Column(
-                        children: [
-                          Container(
-                            alignment: Alignment.centerLeft,
-                            decoration: const BoxDecoration(
-                              color: Color(0xFF069D73),
-                              borderRadius: BorderRadius.vertical(
-                                  top: Radius.circular(20)),
-                            ),
-                            width: double.infinity,
-                            height: 35,
-                            child: const Padding(
-                              padding: EdgeInsets.only(left: 20),
-                              child: Text(
-                                "รายละเอียด",
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 25,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const FittedBox(
-                                child: Padding(
-                                  padding: EdgeInsets.only(left: 15),
-                                  child: SizedBox(
-                                    width: 140,
-                                    child: ListTile(
-                                      contentPadding: EdgeInsets.all(0),
-                                      leading: Icon(
-                                        Icons.scale_rounded,
-                                        size: 25,
-                                        color: GPrimaryColor,
-                                      ),
-                                      title: Text(
-                                        "น้ำหนัก : ",
-                                        style: TextStyle(
-                                            fontSize: 17,
-                                            fontWeight: FontWeight.bold),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              Padding(
-                                padding: EdgeInsets.only(left: 10, top: 17),
-                                child: Text(
-                                  weight.toStringAsFixed(2) + " กรัม",
-                                  style: TextStyle(
-                                      color: Color(0xFF42BD41), fontSize: 18),
-                                ),
-                              )
-                            ],
-                          ),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const FittedBox(
-                                child: Padding(
-                                  padding: EdgeInsets.only(left: 15),
-                                  child: SizedBox(
-                                    width: 140,
-                                    child: ListTile(
-                                      contentPadding: EdgeInsets.all(0),
-                                      leading: Icon(
-                                        Icons.brightness_1,
-                                        size: 25,
-                                        color: GPrimaryColor,
-                                      ),
-                                      title: Text(
-                                        "พื้นที่จุดตำหนิ : ",
-                                        style: TextStyle(
-                                            fontSize: 17,
-                                            fontWeight: FontWeight.bold),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              Padding(
-                                padding: EdgeInsets.only(left: 10, top: 17),
-                                child: Text(
-                                  totalFlawsPercent.toStringAsFixed(2) +
-                                      " ตารางเซนติเมตร",
-                                  style: TextStyle(
-                                      color: Color(0xFF42BD41), fontSize: 18),
-                                ),
-                              )
-                            ],
-                          ),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const FittedBox(
-                                child: Padding(
-                                  padding: EdgeInsets.only(left: 15),
-                                  child: SizedBox(
-                                    width: 140,
-                                    child: ListTile(
-                                      contentPadding: EdgeInsets.all(0),
-                                      leading: Icon(
-                                        Icons.bubble_chart_rounded,
-                                        size: 25,
-                                        color: GPrimaryColor,
-                                      ),
-                                      title: Text(
-                                        "พื้นที่จุดกระสีน้ำตาล : ",
-                                        style: TextStyle(
-                                            fontSize: 17,
-                                            fontWeight: FontWeight.bold),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              Padding(
-                                padding: EdgeInsets.only(left: 10, top: 17),
-                                child: Text(
-                                  totalBrownSpot.toStringAsFixed(2) +
-                                      " เปอร์เซนต์",
-                                  style: TextStyle(
-                                      color: Color(0xFF42BD41), fontSize: 18),
-                                ),
-                              )
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      margin: const EdgeInsets.all(25),
-                      decoration: ShapeDecoration(
-                        gradient: const LinearGradient(
-                          begin: Alignment(0.00, -1.00),
-                          end: Alignment(0, 1),
-                          colors: [Colors.white, Color(0xFFF2F6F5)],
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        shadows: const [
-                          BoxShadow(
-                            color: Color(0x3F000000),
-                            blurRadius: 8,
-                            offset: Offset(2, 2),
-                            spreadRadius: 0,
-                          )
-                        ],
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          const Padding(
-                            padding:
-                                EdgeInsets.only(top: 25, left: 25, right: 25),
-                            child: Text(
-                              "คุณต้องการที่จะบันทึกลงคอลเลคชั่นของคุณหรือไม่ ?",
+                            SizedBox(height: 20),
+                            Text(
+                              "เกิดข้อผิดพลาดในการโหลดข้อมูล",
                               style: TextStyle(
-                                  fontSize: 17, color: Color(0xff069D73)),
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 2,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.red,
+                              ),
                               textAlign: TextAlign.center,
                             ),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.all(10),
-                            child: ElevatedButton(
-                              style: ButtonStyle(
-                                  surfaceTintColor: status == 1
-                                      ? MaterialStateProperty.all(
-                                          Color(0xff069D73))
-                                      : MaterialStateProperty.all(Colors.white),
-                                  backgroundColor: status == 1
-                                      ? MaterialStateProperty.all(
-                                          Color(0xff069D73))
-                                      : MaterialStateProperty.all(Colors.white),
-                                  side: MaterialStateProperty.all(BorderSide(
-                                      color: Color(0xff069D73), width: 2))),
-                              onPressed: status == 1
-                                  ? null
-                                  : () async {
-                                      await _displaybottomsheet(context);
-                                      setState(() {});
-                                    },
-                              child: Text(
-                                status == 1
-                                    ? "คุณได้บันทึกลงคอลเลคชันเรียบร้อย"
-                                    : "บันทึกลงคอลเลคชั่นของคุณ",
-                                style: TextStyle(
-                                    color: status == 1
-                                        ? WhiteColor
-                                        : Color(0xff069D73),
-                                    fontSize: 15),
+                            SizedBox(height: 10),
+                            Text(
+                              "กรุณาลองใหม่อีกครั้ง",
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.grey[600],
                               ),
+                              textAlign: TextAlign.center,
                             ),
-                          )
-                        ],
+                            SizedBox(height: 20),
+                            ElevatedButton(
+                              onPressed: () {
+                                setState(() {
+                                  _loading = true;
+                                  _hasError = false;
+                                });
+                                _initializeData();
+                              },
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: GPrimaryColor,
+                                foregroundColor: Colors.white,
+                              ),
+                              child: Text("ลองใหม่"),
+                            ),
+                          ],
+                        ),
                       ),
+                    )
+                  : Column(
+                      children: [
+                        CarouselSlider(
+                          items: widget.capturedImage
+                              .map(
+                                (image) => AspectRatio(
+                                  aspectRatio: 16 /
+                                      9, // คุณสามารถปรับอัตราส่วนตามต้องการ เช่น 4/3, 1/1 เป็นต้น
+                                  child: Container(
+                                    margin:
+                                        EdgeInsets.symmetric(horizontal: 5.0),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(8.0),
+                                      child: Image.file(
+                                        image,
+                                        fit: BoxFit.cover,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          options: CarouselOptions(
+                            aspectRatio:
+                                16 / 9, // ต้องตรงกับ AspectRatio ของ item
+                            viewportFraction: 0.8,
+                            initialPage: 0,
+                            enableInfiniteScroll: true,
+                            reverse: false,
+                            enlargeCenterPage: true,
+                            scrollDirection: Axis.horizontal,
+                          ),
+                        ),
+                        Card(
+                          clipBehavior: Clip.hardEdge,
+                          shape: const RoundedRectangleBorder(
+                            borderRadius: BorderRadius.vertical(
+                              top: Radius.circular(0),
+                              bottom: Radius.circular(20),
+                            ),
+                            //set border radius more than 50% of height and width to make circle
+                          ),
+                          color: WhiteColor,
+                          child: Column(
+                            children: [
+                              Container(
+                                alignment: Alignment.centerLeft,
+                                decoration: BoxDecoration(
+                                  color: gradeColor[grade],
+                                  borderRadius: BorderRadius.vertical(
+                                      bottom: Radius.circular(20)),
+                                ),
+                                width: double.infinity,
+                                height: 35,
+                                child: const Padding(
+                                  padding: EdgeInsets.only(left: 25),
+                                  child: Text(
+                                    "จากผลการวิเคราะห์คุณภาพพบว่า :",
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 16,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                        left: 25, top: 10),
+                                    child: Text(
+                                      "เกรดระดับ ",
+                                      style: TextStyle(
+                                          color: Colors.black.withOpacity(0.8),
+                                          fontSize: 20),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: EdgeInsets.only(left: 10, top: 10),
+                                    child: Text(
+                                      "$grade",
+                                      style: TextStyle(
+                                          color: gradeColor[grade],
+                                          fontSize: 20),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: EdgeInsets.only(left: 110, top: 0),
+                                    child: IconButton(
+                                      icon: FaIcon(
+                                        FontAwesomeIcons.shareNodes,
+                                        color: gradeColor[grade],
+                                      ),
+                                      onPressed: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (context) => SharePage(
+                                              grade: grade,
+                                              anotherNote: anotherNote,
+                                              capturedImages:
+                                                  widget.capturedImage,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Padding(
+                                    padding: EdgeInsets.only(
+                                        left: 25,
+                                        top: 5,
+                                        bottom: 10,
+                                        right: 15),
+                                    child: SingleChildScrollView(
+                                      child: Text(
+                                        anotherNote,
+                                        style: TextStyle(
+                                            color: gradeColor[grade],
+                                            fontSize: 17),
+                                        // overflow: TextOverflow.ellipsis,
+                                        // maxLines: 2,
+                                      ),
+                                    ),
+                                  )
+                                ],
+                              )
+                            ],
+                          ),
+                        ),
+                        Card(
+                          clipBehavior: Clip.hardEdge,
+                          margin: EdgeInsets.only(top: 25),
+                          shape: const RoundedRectangleBorder(
+                            borderRadius: BorderRadius.vertical(
+                              top: Radius.circular(20),
+                              bottom: Radius.circular(10),
+                            ),
+                            //set border radius more than 50% of height and width to make circle
+                          ),
+                          color: WhiteColor,
+                          child: Column(
+                            children: [
+                              Container(
+                                alignment: Alignment.centerLeft,
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFF069D73),
+                                  borderRadius: BorderRadius.vertical(
+                                      top: Radius.circular(20)),
+                                ),
+                                width: double.infinity,
+                                height: 35,
+                                child: const Padding(
+                                  padding: EdgeInsets.only(left: 20),
+                                  child: Text(
+                                    "รายละเอียด",
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 25,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const FittedBox(
+                                    child: Padding(
+                                      padding: EdgeInsets.only(left: 15),
+                                      child: SizedBox(
+                                        width: 140,
+                                        child: ListTile(
+                                          contentPadding: EdgeInsets.all(0),
+                                          leading: Icon(
+                                            Icons.scale_rounded,
+                                            size: 25,
+                                            color: GPrimaryColor,
+                                          ),
+                                          title: Text(
+                                            "น้ำหนัก : ",
+                                            style: TextStyle(
+                                                fontSize: 17,
+                                                fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: EdgeInsets.only(left: 10, top: 17),
+                                    child: Text(
+                                      weight.toStringAsFixed(2) + " กรัม",
+                                      style: TextStyle(
+                                          color: Color(0xFF42BD41),
+                                          fontSize: 18),
+                                    ),
+                                  )
+                                ],
+                              ),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const FittedBox(
+                                    child: Padding(
+                                      padding: EdgeInsets.only(left: 15),
+                                      child: SizedBox(
+                                        width: 140,
+                                        child: ListTile(
+                                          contentPadding: EdgeInsets.all(0),
+                                          leading: Icon(
+                                            Icons.brightness_1,
+                                            size: 25,
+                                            color: GPrimaryColor,
+                                          ),
+                                          title: Text(
+                                            "พื้นที่จุดตำหนิ : ",
+                                            style: TextStyle(
+                                                fontSize: 17,
+                                                fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: EdgeInsets.only(left: 10, top: 17),
+                                    child: Text(
+                                      totalFlawsPercent.toStringAsFixed(2) +
+                                          " ตารางเซนติเมตร",
+                                      style: TextStyle(
+                                          color: Color(0xFF42BD41),
+                                          fontSize: 18),
+                                    ),
+                                  )
+                                ],
+                              ),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const FittedBox(
+                                    child: Padding(
+                                      padding: EdgeInsets.only(left: 15),
+                                      child: SizedBox(
+                                        width: 140,
+                                        child: ListTile(
+                                          contentPadding: EdgeInsets.all(0),
+                                          leading: Icon(
+                                            Icons.bubble_chart_rounded,
+                                            size: 25,
+                                            color: GPrimaryColor,
+                                          ),
+                                          title: Text(
+                                            "พื้นที่จุดกระสีน้ำตาล : ",
+                                            style: TextStyle(
+                                                fontSize: 17,
+                                                fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: EdgeInsets.only(left: 10, top: 17),
+                                    child: Text(
+                                      totalBrownSpot.toStringAsFixed(2) +
+                                          " เปอร์เซนต์",
+                                      style: TextStyle(
+                                          color: Color(0xFF42BD41),
+                                          fontSize: 18),
+                                    ),
+                                  )
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          margin: const EdgeInsets.all(25),
+                          decoration: ShapeDecoration(
+                            gradient: const LinearGradient(
+                              begin: Alignment(0.00, -1.00),
+                              end: Alignment(0, 1),
+                              colors: [Colors.white, Color(0xFFF2F6F5)],
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            shadows: const [
+                              BoxShadow(
+                                color: Color(0x3F000000),
+                                blurRadius: 8,
+                                offset: Offset(2, 2),
+                                spreadRadius: 0,
+                              )
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              const Padding(
+                                padding: EdgeInsets.only(
+                                    top: 25, left: 25, right: 25),
+                                child: Text(
+                                  "คุณต้องการที่จะบันทึกลงคอลเลคชั่นของคุณหรือไม่ ?",
+                                  style: TextStyle(
+                                      fontSize: 17, color: Color(0xff069D73)),
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 2,
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.all(10),
+                                child: ElevatedButton(
+                                  style: ButtonStyle(
+                                      surfaceTintColor: status == 1
+                                          ? MaterialStateProperty.all(
+                                              Color(0xff069D73))
+                                          : MaterialStateProperty.all(
+                                              Colors.white),
+                                      backgroundColor: status == 1
+                                          ? MaterialStateProperty.all(
+                                              Color(0xff069D73))
+                                          : MaterialStateProperty.all(
+                                              Colors.white),
+                                      side: MaterialStateProperty.all(
+                                          BorderSide(
+                                              color: Color(0xff069D73),
+                                              width: 2))),
+                                  onPressed: status == 1
+                                      ? null
+                                      : () async {
+                                          await _displaybottomsheet(context);
+                                          setState(() {});
+                                        },
+                                  child: Text(
+                                    status == 1
+                                        ? "คุณได้บันทึกลงคอลเลคชันเรียบร้อย"
+                                        : "บันทึกลงคอลเลคชั่นของคุณ",
+                                    style: TextStyle(
+                                        color: status == 1
+                                            ? WhiteColor
+                                            : Color(0xff069D73),
+                                        fontSize: 15),
+                                  ),
+                                ),
+                              )
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
         ));
   }
 

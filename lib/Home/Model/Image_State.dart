@@ -31,14 +31,12 @@ class ImageState extends ChangeNotifier {
     required Future<bool> Function() checkInternetConnection,
   }) async {
     try {
-      final List<XFile> images = 
-          await _picker.pickMultiImage(imageQuality: 60);
+      final List<XFile> images = await _picker.pickMultiImage(imageQuality: 60);
 
       if (images.isNotEmpty) {
         // จำกัดจำนวนรูปไม่เกิน 4 รูป
-        List<XFile> selectedImages = images.length > 4
-            ? images.sublist(0, 4)
-            : images;
+        List<XFile> selectedImages =
+            images.length > 4 ? images.sublist(0, 4) : images;
 
         Set<int> existingStatusImages =
             capturedImages.map((image) => image.statusimage).toSet();
@@ -68,8 +66,14 @@ class ImageState extends ChangeNotifier {
           return;
         }
 
-        // ดำเนินการวิเคราะห์รูปภาพทั้งหมด
-        await Future.wait(analysisFutures);
+        // ดำเนินการวิเคราะห์รูปภาพทีละรูป เพื่อป้องกัน rate limit
+        for (int i = 0; i < analysisFutures.length; i++) {
+          if (i > 0) {
+            // เพิ่ม delay 2 วินาทีระหว่างการเรียก API แต่ละครั้ง
+            await Future.delayed(Duration(seconds: 2));
+          }
+          await analysisFutures[i];
+        }
       }
     } on PlatformException catch (e) {
       onError(e.toString());
@@ -135,9 +139,8 @@ class ImageState extends ChangeNotifier {
   }
 
   List<CapturedImage> get getSortedImages {
-    final sortedList = [...capturedImages]..sort(
-      (a, b) => a.statusimage.compareTo(b.statusimage)
-    );
+    final sortedList = [...capturedImages]
+      ..sort((a, b) => a.statusimage.compareTo(b.statusimage));
     return sortedList;
   }
 
@@ -157,6 +160,7 @@ class ImageState extends ChangeNotifier {
         capturedImages.every(
             (image) => image.statusMango == 1 && image.statusMangoColor == 1);
   }
+
   // ดึงรูปภาพทั้งหมด
   List<CapturedImage> get getAllImages => capturedImages;
 }

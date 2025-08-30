@@ -3,21 +3,20 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:loading_animation_widget/loading_animation_widget.dart';
 import 'package:watalygold/Home/Quality/Result.dart';
-import 'package:watalygold/Home/Quality/result_screen.dart';
 
 import 'dart:async';
 import 'dart:io';
 import 'package:image/image.dart' as img;
-import 'package:http/http.dart' as http;
 import 'package:flutter_gemini/flutter_gemini.dart';
 import 'package:firebase_ml_model_downloader/firebase_ml_model_downloader.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:watalygold/Widgets/Appbar_main_exit.dart';
 import 'package:watalygold/Widgets/Appbar_main_exit_only.dart';
 import 'package:watalygold/Widgets/Color.dart';
 import 'package:watalygold/Widgets/WeightNumber/DialogAlertWNbyGemini.dart';
@@ -26,6 +25,7 @@ import 'package:watalygold/Widgets/WeightNumber/DialogError.dart';
 import 'package:watalygold/Widgets/WeightNumber/DialogHowtoUse_SelectNW.dart';
 import 'package:watalygold/Widgets/WeightNumber/DialogHowtoUse_WN.dart';
 import 'package:watalygold/Widgets/WeightNumber/DialogWeightNumber.dart';
+import 'package:watalygold/utils/gemini_rate_limiter.dart';
 
 class WeightNumber extends StatefulWidget {
   final Map<String, String?> httpscall;
@@ -48,7 +48,6 @@ class _WeightNumberState extends State<WeightNumber> {
   String? result;
 
   final ImagePicker picker = ImagePicker();
-  bool _isProcessing = false;
 
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
@@ -82,6 +81,7 @@ class _WeightNumberState extends State<WeightNumber> {
   }
 
   void _alertChoose() async {
+    debugPrint("_alertChoose called");
     bool? result = await showDialog<bool>(
       barrierDismissible: false,
       context: context,
@@ -89,8 +89,11 @@ class _WeightNumberState extends State<WeightNumber> {
         return const Dialog_Choose();
       },
     );
+    debugPrint("Dialog_Choose result: $result");
+
     if (result != null) {
       if (result) {
+        debugPrint("User chose to enter weight manually");
         var results = await showDialog(
           barrierDismissible: false,
           context: context,
@@ -98,20 +101,44 @@ class _WeightNumberState extends State<WeightNumber> {
             return const Dialog_WeightNumber();
           },
         );
-        if (results.isNotEmpty) {
-          if (results == "") {
-            debugPrint("ไม่มีน้ำหนักที่ได้มา");
+        debugPrint("Dialog_WeightNumber result: '$results'");
+
+        if (results != null && results.toString().isNotEmpty) {
+          String weightString = results.toString();
+          if (weightString.isEmpty) {
+            debugPrint("Weight string is empty");
+            await showDialog(
+              context: context,
+              barrierDismissible: false,
+              builder: (BuildContext context) {
+                return Dialog_Error(
+                    name: "เกิดข้อผิดพลาด", content: "กรุณาใส่ค่าน้ำหนัก");
+              },
+            );
+            return;
           } else {
-            numbersOnly = results;
+            numbersOnly = weightString;
+            debugPrint("Set numbersOnly to: '$numbersOnly'");
             await useFunctionandresult();
           }
+        } else {
+          debugPrint("No weight value received from dialog");
+          await showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (BuildContext context) {
+              return Dialog_Error(
+                  name: "เกิดข้อผิดพลาด",
+                  content: "ไม่พบค่าน้ำหนัก กรุณาลองใหม่อีกครั้ง");
+            },
+          );
         }
       } else {
         // Handle the case where the dialog returned false
-        print("Dialog false");
+        debugPrint("User chose not to enter weight manually");
       }
     } else {
-      print("ไม่ได้กด Dialog หรือ error");
+      debugPrint("Dialog was cancelled or returned null");
     }
   }
 
@@ -149,24 +176,6 @@ class _WeightNumberState extends State<WeightNumber> {
     //   debugPrint('Error initializing camera: $e');
     //   // Handle the error appropriately
     // }
-  }
-
-  void _processImage(CameraImage image) {
-    if (_isProcessing) {
-      double averageBrightness = _calculateAverageBrightness(image);
-      debugPrint('Average Brightness: $averageBrightness');
-      _isProcessing = false;
-    }
-  }
-
-  double _calculateAverageBrightness(CameraImage image) {
-    var bytes = image.planes[0].bytes;
-    int total = 0;
-    // เพื่อประสิทธิภาพ เราจะสุ่มตัวอย่างเพียงบางพิกเซล
-    for (int i = 0; i < bytes.length; i += 10) {
-      total += bytes[i];
-    }
-    return total / (bytes.length / 10);
   }
 
   @override
@@ -208,44 +217,201 @@ class _WeightNumberState extends State<WeightNumber> {
   }
 
   Future useFunctionandresult() async {
-    showdialogloadingprocessing();
-    weight = numbersOnly.toString();
-    debugPrint("ค่าน้ำหนัก $weight");
-    widget.httpscall["weight"] = weight;
-    debugPrint("${widget.httpscall}");
-    // widget.httpscall["weight"] = numbersOnly.toString();
-    var firebasefunctions =
-        FirebaseFunctions.instanceFor(region: 'asia-southeast1');
-
     try {
+      debugPrint("Starting useFunctionandresult with weight: $numbersOnly");
+
+      if (numbersOnly.isEmpty) {
+        debugPrint("Error: numbersOnly is empty");
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext context) {
+            return Dialog_Error(
+                name: "เกิดข้อผิดพลาด",
+                content: "ไม่พบค่าน้ำหนัก กรุณาลองใหม่อีกครั้ง");
+          },
+        );
+        return;
+      }
+
+      showdialogloadingprocessing();
+      weight = numbersOnly.toString();
+      debugPrint("ค่าน้ำหนัก $weight");
+      widget.httpscall["weight"] = weight;
+      debugPrint("httpscall data: ${widget.httpscall}");
+
+      // ตรวจสอบการเชื่อมต่อเครือข่าย
+      var connectivityResult = await (Connectivity().checkConnectivity());
+      if (connectivityResult.contains(ConnectivityResult.none)) {
+        debugPrint("Error: No internet connection");
+        Navigator.of(context).pop();
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext context) {
+            return Dialog_Error(
+                name: "ไม่มีการเชื่อมต่ออินเทอร์เน็ต",
+                content: "กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต");
+          },
+        );
+        return;
+      }
+
+      // ตรวจสอบ Firebase initialization
+      if (!Firebase.apps.isNotEmpty) {
+        debugPrint("Error: Firebase not initialized");
+        Navigator.of(context).pop();
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext context) {
+            return Dialog_Error(
+                name: "เกิดข้อผิดพลาดบางอย่าง",
+                content: "Firebase ยังไม่ได้ถูกเริ่มต้น กรุณาเริ่มต้นแอปใหม่");
+          },
+        );
+        return;
+      }
+
+      // ตรวจสอบข้อมูลที่จำเป็น
+      if (widget.httpscall["downloadurl"] == null ||
+          widget.httpscall["imagename"] == null ||
+          widget.httpscall["result"] == null) {
+        debugPrint("Error: Missing required fields in httpscall");
+        debugPrint("downloadurl: ${widget.httpscall["downloadurl"]}");
+        debugPrint("imagename: ${widget.httpscall["imagename"]}");
+        debugPrint("result: ${widget.httpscall["result"]}");
+        Navigator.of(context).pop();
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext context) {
+            return Dialog_Error(
+                name: "เกิดข้อผิดพลาดบางอย่าง",
+                content: "ข้อมูลไม่ครบถ้วน กรุณาลองใหม่อีกครั้ง");
+          },
+        );
+        return;
+      }
+
+      var firebasefunctions =
+          FirebaseFunctions.instanceFor(region: 'asia-southeast1');
+
+      debugPrint("Calling Firebase function addImages...");
+      debugPrint("Request data: ${widget.httpscall}");
+
       final result = await firebasefunctions
           .httpsCallable("addImages")
-          .call(widget.httpscall);
-      stdout.writeln(result.data);
+          .call(widget.httpscall)
+          .timeout(
+        Duration(seconds: 30),
+        onTimeout: () {
+          throw Exception('Firebase function call timeout');
+        },
+      );
+
+      debugPrint("Firebase function response received");
+      debugPrint("Response: ${result.data}");
+
+      if (result.data == null) {
+        debugPrint("Error: Firebase function returned null data");
+        throw Exception('Firebase function returned null data');
+      }
+
       final Map<String, dynamic> data = Map<String, dynamic>.from(result.data);
+      debugPrint("Parsed response data: $data");
+
+      if (!data.containsKey('ID_Result') || !data.containsKey('IDs')) {
+        debugPrint("Error: Missing required fields in response");
+        debugPrint("Available keys: ${data.keys}");
+        throw Exception('Firebase function response missing required fields');
+      }
 
       idResult = data['ID_Result'];
       ids = List<String>.from(data['IDs']);
 
-      // นำค่า idResult และ ids ไปใช้ต่อได้ตามต้องการ
-      stdout.writeln('ID_Result: $idResult');
-      stdout.writeln('IDs: $ids');
+      debugPrint('Successfully got ID_Result: $idResult');
+      debugPrint('Successfully got IDs: $ids');
     } on FirebaseFunctionsException catch (error) {
       debugPrint(
-          'Functions error code: ${error.code}, details: ${error.details}, message: ${error.message}');
+          'FirebaseFunctionsException - code: ${error.code}, details: ${error.details}, message: ${error.message}');
       Navigator.of(context).pop();
+
+      String errorMessage;
+      switch (error.code) {
+        case 'internal':
+          errorMessage = "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์ กรุณาลองใหม่อีกครั้ง";
+          break;
+        case 'unauthenticated':
+          errorMessage = "ไม่ได้รับอนุญาต กรุณาเข้าสู่ระบบใหม่";
+          break;
+        case 'permission-denied':
+          errorMessage = "ไม่มีสิทธิ์เข้าถึง";
+          break;
+        case 'unavailable':
+          errorMessage = "บริการไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง";
+          break;
+        case 'deadline-exceeded':
+          errorMessage = "หมดเวลาการเชื่อมต่อ กรุณาตรวจสอบอินเทอร์เน็ต";
+          break;
+        default:
+          errorMessage = "เกิดข้อผิดพลาดจาก Firebase: ${error.message}";
+      }
+
       await showDialog(
         context: context,
         barrierDismissible: false,
         builder: (BuildContext context) {
           return Dialog_Error(
-              name: "เกิดข้อผิดพลาดบางอย่าง", content: "กรุณาลองใหม่อีกครั้ง");
+              name: "เกิดข้อผิดพลาด Firebase", content: errorMessage);
+        },
+      );
+      return;
+    } catch (error) {
+      debugPrint('Unexpected error in useFunctionandresult: $error');
+      debugPrint('Error type: ${error.runtimeType}');
+      Navigator.of(context).pop();
+
+      String errorMessage;
+      if (error.toString().contains('timeout')) {
+        errorMessage = "หมดเวลาการเชื่อมต่อ กรุณาตรวจสอบอินเทอร์เน็ต";
+      } else if (error.toString().contains('network') ||
+          error.toString().contains('connection')) {
+        errorMessage = "ปัญหาการเชื่อมต่อเครือข่าย กรุณาตรวจสอบอินเทอร์เน็ต";
+      } else {
+        errorMessage = "เกิดข้อผิดพลาดที่ไม่คาดคิด กรุณาลองใหม่อีกครั้ง";
+      }
+
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return Dialog_Error(
+              name: "เกิดข้อผิดพลาดบางอย่าง", content: errorMessage);
         },
       );
       return;
     }
 
     Navigator.of(context).pop();
+
+    // ตรวจสอบค่าก่อนไปยังหน้าผลลัพธ์
+    if (idResult.isEmpty || ids.isEmpty) {
+      debugPrint("Error: Empty idResult or ids after successful call");
+      debugPrint("idResult: '$idResult', ids: $ids");
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return Dialog_Error(
+              name: "เกิดข้อผิดพลาดบางอย่าง",
+              content: "ไม่สามารถได้รับข้อมูลผลลัพธ์ กรุณาลองใหม่อีกครั้ง");
+        },
+      );
+      return;
+    }
+
+    debugPrint("Navigating to ResultPage...");
     // ไปยังหน้าหลัก
     Navigator.push(
       context,
@@ -407,7 +573,8 @@ class _WeightNumberState extends State<WeightNumber> {
             img.decodeImage(await file.readAsBytes())!;
 
         final processedImageHSV = await preprocessImagesHSV(originalImage);
-        final processedImageFile = File('${file.path}_processed.png')
+        // Save processed image for debugging if needed
+        File('${file.path}_processed.png')
           ..writeAsBytesSync(img.encodePng(processedImageHSV));
         final processedImageBW = await _preprocessImageblackandwhite(file);
 
@@ -418,25 +585,73 @@ class _WeightNumberState extends State<WeightNumber> {
     }
   }
 
+  Future<dynamic> _callGeminiForWeightReading(File file,
+      {int maxRetries = 3}) async {
+    final rateLimiter = GeminiRateLimiter();
+
+    return await rateLimiter.executeRequest(() async {
+      for (int attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          debugPrint("Gemini weight reading attempt $attempt/$maxRetries");
+
+          // Add delay between retries
+          if (attempt > 1) {
+            int delaySeconds = attempt * 3; // 3s, 6s, 9s...
+            debugPrint("Waiting ${delaySeconds}s before retry...");
+            await Future.delayed(Duration(seconds: delaySeconds));
+          }
+
+          final gemini = Gemini.instance;
+          final result = await gemini.textAndImage(
+            text:
+                """The picture shows a digital scale with digital numbers and decimal points.
+        There is a weight attached to the picture, with a white background and black numbers.
+        However, if you do not see the numbers on the digital scale screen,
+        you will have to answer "There are no numbers or scales in this picture."
+        I would like you to read the weight on the scale, for example 325.25 g .""",
+            images: [file.readAsBytesSync()],
+          ).timeout(Duration(seconds: 60));
+
+          debugPrint("Gemini weight reading successful");
+          return result;
+        } catch (error) {
+          debugPrint("Gemini weight reading attempt $attempt failed: $error");
+
+          bool shouldRetry = false;
+          if (error.toString().contains('429')) {
+            shouldRetry = true;
+            debugPrint("Rate limit error detected, will retry...");
+          } else if (error is TimeoutException) {
+            shouldRetry = attempt < maxRetries;
+            debugPrint("Timeout error, will retry: $shouldRetry");
+          } else if (error.toString().toLowerCase().contains('network') ||
+              error.toString().toLowerCase().contains('connection')) {
+            shouldRetry = attempt < maxRetries;
+            debugPrint("Network error, will retry: $shouldRetry");
+          }
+
+          if (!shouldRetry || attempt == maxRetries) {
+            throw error;
+          }
+        }
+      }
+
+      throw Exception("All weight reading retry attempts failed");
+    });
+  }
+
   Future<void> processImageAndAnalyze(File file) async {
     try {
       setState(() {
         geminiProcessCount++;
       });
 
-      final gemini = Gemini.instance;
-      final result = await gemini.textAndImage(
-        text:
-            """The picture shows a digital scale with digital numbers and decimal points.
-    There is a weight attached to the picture, with a white background and black numbers.
-    However, if you do not see the numbers on the digital scale screen,
-    you will have to answer "There are no numbers or scales in this picture."
-    I would like you to read the weight on the scale, for example 325.25 g .""",
-        images: [file.readAsBytesSync()],
-      );
+      debugPrint("Starting Gemini weight reading analysis");
+
+      final result = await _callGeminiForWeightReading(file);
 
       var geminiText = result?.content?.parts?.last.text ?? '';
-      debugPrint("Gemini response: $geminiText");
+      debugPrint("Gemini weight reading response: $geminiText");
       // var geminiText = "258.8 g";
       if (geminiText == 'There are no numbers or scales in this picture') {
         Navigator.of(context).pop(); // ปิด dialog กำลังโหลด
@@ -618,10 +833,6 @@ class _WeightNumberState extends State<WeightNumber> {
     return processedFile;
   }
 
-  String _extractNumbersOCR(String text) {
-    return text.replaceAll(RegExp(r'[^0-9]'), '').trim();
-  }
-
   String? _extractNumbersGeminiText(String response) {
     final regex =
         RegExp(r"(\d+(\.\d*)?)\s*([a-zA-Z]*)"); // เปลี่ยนให้หน่วยเป็น optional
@@ -636,22 +847,6 @@ class _WeightNumberState extends State<WeightNumber> {
       return "$number $finalUnit"; // คืนค่าตัวเลขพร้อมหน่วย
     }
     return null;
-  }
-
-  Future<File> _preprocessImage(File imageFile) async {
-    final originalImage = img.decodeImage(imageFile.readAsBytesSync());
-    if (originalImage == null) return imageFile;
-    // แปลงภาพเป็น grayscale
-    // final grayscaleImage = img.grayscale(originalImage);
-    // ปรับแสงและความคม (เพิ่ม contrast, brightness)
-    // final contrastImage = img.adjustColor(originalImage, contrast: 1, brightness:);
-    // ทำให้ภาพเบลอเล็กน้อยเพื่อให้เส้นขอบอ่อนลง (ถ้าได้ผลดี ให้เพิ่ม sharpen)
-    // final sharpenedImage = img.adjustColor(contrastImage, contrast: 2);
-    // บันทึกภาพใหม่ลงในไฟล์ชั่วคราว
-    final processedFile = File(imageFile.path)
-      ..writeAsBytesSync(img.encodeJpg(originalImage));
-
-    return processedFile;
   }
 
   late int flashstatus = 0;
