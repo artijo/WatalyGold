@@ -325,7 +325,7 @@ class TakePictureScreenState extends State<TakePictureScreen> {
       final result = await firebasefunctions
           .httpsCallable("detectcoin10and5")
           .call(previewResult)
-          .timeout(Duration(seconds: 360)); // Add timeout
+          .timeout(Duration(seconds: 30)); // Add timeout
 
       print("Coin detection result: ${result.data}");
 
@@ -573,7 +573,7 @@ class TakePictureScreenState extends State<TakePictureScreen> {
       // ตรวจสอบการเชื่อมต่ออินเทอร์เน็ต
       try {
         final result = await InternetAddress.lookup('google.com')
-            .timeout(Duration(seconds: 60));
+            .timeout(Duration(seconds: 10));
         if (result.isNotEmpty && result[0].rawAddress.isNotEmpty) {
           debugPrint('Internet connection: OK');
         }

@@ -304,7 +304,7 @@ class _WeightNumberState extends State<WeightNumber> {
           .httpsCallable("addImages")
           .call(widget.httpscall)
           .timeout(
-        Duration(seconds: 30),
+        Duration(seconds: 360), // เพิ่ม timeout เป็น 2 นาที
         onTimeout: () {
           throw Exception('Firebase function call timeout');
         },
@@ -352,7 +352,8 @@ class _WeightNumberState extends State<WeightNumber> {
           errorMessage = "บริการไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง";
           break;
         case 'deadline-exceeded':
-          errorMessage = "หมดเวลาการเชื่อมต่อ กรุณาตรวจสอบอินเทอร์เน็ต";
+          errorMessage =
+              "หมดเวลาการเชื่อมต่อ การประมวลผลใช้เวลานานกว่าปกติ กรุณาลองใหม่อีกครั้ง";
           break;
         default:
           errorMessage = "เกิดข้อผิดพลาดจาก Firebase: ${error.message}";
@@ -373,8 +374,10 @@ class _WeightNumberState extends State<WeightNumber> {
       Navigator.of(context).pop();
 
       String errorMessage;
-      if (error.toString().contains('timeout')) {
-        errorMessage = "หมดเวลาการเชื่อมต่อ กรุณาตรวจสอบอินเทอร์เน็ต";
+      if (error.toString().contains('timeout') ||
+          error.toString().contains('Firebase function call timeout')) {
+        errorMessage =
+            "การประมวลผลใช้เวลานานกว่าปกติ กรุณารอสักครู่แล้วลองใหม่อีกครั้ง";
       } else if (error.toString().contains('network') ||
           error.toString().contains('connection')) {
         errorMessage = "ปัญหาการเชื่อมต่อเครือข่าย กรุณาตรวจสอบอินเทอร์เน็ต";
@@ -447,7 +450,7 @@ class _WeightNumberState extends State<WeightNumber> {
           child: AlertDialog(
             backgroundColor: GPrimaryColor.withOpacity(0.6),
             contentPadding:
-                const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
+                const EdgeInsets.symmetric(vertical: 15, horizontal: 15),
             title: Column(
               children: [
                 FittedBox(
@@ -455,13 +458,19 @@ class _WeightNumberState extends State<WeightNumber> {
                   child: Text(
                     'กำลังตรวจสอบน้ำหนัก',
                     style: TextStyle(color: WhiteColor, fontSize: 20),
-                    textAlign: TextAlign
-                        .center, // Add this line to center the title text
+                    textAlign: TextAlign.center,
                   ),
                 ),
-                const SizedBox(
-                  height: 15,
+                const SizedBox(height: 10),
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    'กรุณารอสักครู่ การประมวลผลอาจใช้เวลา 1-2 นาที',
+                    style: TextStyle(color: WhiteColor, fontSize: 14),
+                    textAlign: TextAlign.center,
+                  ),
                 ),
+                const SizedBox(height: 15),
                 LoadingAnimationWidget.discreteCircle(
                   color: WhiteColor,
                   secondRingColor: GPrimaryColor,
@@ -470,7 +479,6 @@ class _WeightNumberState extends State<WeightNumber> {
                 ),
               ],
             ),
-            // actions: [],
           ),
         ),
       ),
@@ -540,7 +548,7 @@ class _WeightNumberState extends State<WeightNumber> {
               child: AlertDialog(
                 backgroundColor: GPrimaryColor.withOpacity(0.6),
                 contentPadding:
-                    const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
+                    const EdgeInsets.symmetric(vertical: 15, horizontal: 15),
                 title: Column(
                   children: [
                     FittedBox(
@@ -548,13 +556,19 @@ class _WeightNumberState extends State<WeightNumber> {
                       child: Text(
                         'กำลังตรวจสอบน้ำหนัก',
                         style: TextStyle(color: WhiteColor, fontSize: 20),
-                        textAlign: TextAlign
-                            .center, // Add this line to center the title text
+                        textAlign: TextAlign.center,
                       ),
                     ),
-                    const SizedBox(
-                      height: 15,
+                    const SizedBox(height: 10),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        'กรุณารอสักครู่ การประมวลผลอาจใช้เวลา 1-2 นาที',
+                        style: TextStyle(color: WhiteColor, fontSize: 14),
+                        textAlign: TextAlign.center,
+                      ),
                     ),
+                    const SizedBox(height: 15),
                     LoadingAnimationWidget.discreteCircle(
                       color: WhiteColor,
                       secondRingColor: GPrimaryColor,
@@ -563,7 +577,6 @@ class _WeightNumberState extends State<WeightNumber> {
                     ),
                   ],
                 ),
-                // actions: [],
               ),
             ),
           ),
@@ -610,7 +623,7 @@ class _WeightNumberState extends State<WeightNumber> {
         you will have to answer "There are no numbers or scales in this picture."
         I would like you to read the weight on the scale, for example 325.25 g .""",
             images: [file.readAsBytesSync()],
-          ).timeout(Duration(seconds: 60));
+          ).timeout(Duration(seconds: 360)); // เพิ่ม timeout เป็น 90 วินาที
 
           debugPrint("Gemini weight reading successful");
           return result;
